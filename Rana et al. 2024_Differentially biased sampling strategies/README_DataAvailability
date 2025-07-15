@@ -1,0 +1,6 @@
+The available data and code has been used in the manuscript titled "Differentially biased sampling strategies reveal the non-stationarity of species distribution models for Indian small felids" with doi: 10.1016/j.ecolmodel.2024.110749
+The description of attached files are as follows:
+1. all_train.rda: This R data consists of a dataframe with all training data for building the SDMs.
+2. Main_script: This is R script for building SDMs and comparing predictions.
+3. Predicted_rasters: All the raw .tif files of the predicted rasters are available here:
+   * Name format for each raster is "Species""DataType""DataExtent"_predicted_raster_modified.tif where species is FC (fishing cat), LC (leopard cat), JC (jungle cat), RSC (rusty spotted cat); data type is PO (Presence-only) and PA (Presence-Absence); data extent is India and Range.
