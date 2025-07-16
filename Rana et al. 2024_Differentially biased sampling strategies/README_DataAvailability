@@ -2,5 +2,5 @@ The available data and code has been used in the manuscript titled "Differential
 The description of attached files are as follows:
 1. all_train.rda: This R data consists of a dataframe with all training data for building the SDMs.
 2. Main_script: This is R script for building SDMs and comparing predictions.
-3. Predicted_rasters: All the raw .tif files of the predicted rasters are available here:
+3. Predicted_rasters: All the raw .tif files of the predicted rasters are available here: https://doi.org/10.6084/m9.figshare.29579282
    * Name format for each raster is "Species""DataType""DataExtent"_predicted_raster_modified.tif where species is FC (fishing cat), LC (leopard cat), JC (jungle cat), RSC (rusty spotted cat); data type is PO (Presence-only) and PA (Presence-Absence); data extent is India and Range.
