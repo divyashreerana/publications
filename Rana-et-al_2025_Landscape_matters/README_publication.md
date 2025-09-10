@@ -1,6 +1,6 @@
 This folder contains data and codes for the paper "Landscape matters: Deriving a generalizable understanding of population connectivity using empirical data and graph theory" submitted in bioRxiv preprint server in September 2025.
 
-DOI: 
+DOI: https://www.biorxiv.org/content/10.1101/2025.09.05.674386v1
 
 Abstract/Highlights: Human impacts on ecosystems have accelerated globally, driving a 10% decline in terrestrial biodiversity and a 70% decline in wildlife populations over the past five decades. These losses are closely linked to habitat modification and fragmentation, highlighting the urgent need for management strategies grounded in a clear understanding of how wildlife use landscapes and navigate human-altered areas. Connectivity between populations is critical for species persistence, and is shaped by the interplay between landscape features and species movement. Most connectivity studies pursue application-focused goals, such as designing corridors or assessing land-use effects, often targeting single species within specific landscapes. While these approaches provide depth, they limit the development of general principles that apply across species and regions. Graph theory offers a powerful framework to distill complex connectivity patterns into comparable metrics, creating opportunities to identify such generalities.
 
