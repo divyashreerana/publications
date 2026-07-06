@@ -1,0 +1,1181 @@
+---
+title: "Multispecies Connectivity Analysis"
+author: "Divyashree Rana"
+date: "`r Sys.Date()`"
+
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  dpi = 300
+)
+
+```
+
+This workflow compares multispecies Circuitscape connectivity outputs to identify shared movement corridors, quantify similarity in connectivity patterns among species, and evaluate the efficiency of optimized corridors relative to the existing corridor network.
+
+The workflow consists of the following steps:
+
+1. Load required packages
+2. Import Circuitscape and related inputs
+3. Data preprocessing
+4. Species-specific connectivity analyses
+5. Spatial similarity of connectivity patterns across species
+6. Evaluation of optimized corridors
+7. Identification of multispecies corridor priorities
+
+# Load required packages
+
+```{r load_packages, message=FALSE, warning=FALSE}
+
+library(terra)
+library(sf)
+
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+library(ggplot2)
+library(reshape2)
+
+```
+
+---
+# Load Circuitscape and related inputs
+
+Load circuitscape inputs and relevant shapefiles for subsequent comparisons.
+
+- Species specific circuitscape surfaces
+- Resistance surfaces
+- Habitat node raster
+- NTCA corridor shapefile
+- Pairwise effective resistance matrices
+
+### Define species
+
+```{r species}
+
+species_names <- c(
+  "LP",
+  "FC",
+  "JC",
+  "TG",
+  "SB"
+)
+
+```
+
+### Define file locations
+
+```{r paths}
+
+results_dir <- "./results"
+figure_dir  <- "./figure"
+
+```
+
+### Load cumulative current maps
+
+```{r load_currents}
+
+current_files <- file.path(
+  results_dir,
+  paste0(species_names, "_circuitscape_cum_curmap.asc")
+)
+
+currents <- lapply(current_files, rast)
+
+names(currents) <- species_names
+
+```
+
+### Load resistance surfaces
+
+```{r load_resistance}
+
+resistance_files <- file.path(
+  results_dir,
+  c(
+    "LP_subset4_resistance_surface.asc",
+    "FC_subset1_resistance_surface.asc",
+    "JC_subset5_resistance_surface.asc",
+    "TG_subset3_resistance_surface.asc",
+    "SB_subset2_resistance_surface.asc"
+  )
+)
+
+resistance_surfaces <- lapply(resistance_files, rast)
+
+names(resistance_surfaces) <- species_names
+
+```
+
+### Load pairwise effective resistance matrices
+
+```{r load_resistance_matrix}
+
+resistance_matrix_files <- file.path(
+  results_dir,
+  paste0(species_names, "_circuitscape_resistances.out")
+)
+
+res_mats <- lapply(
+  resistance_matrix_files,
+  function(f)
+    as.matrix(
+      read.table(
+        f,
+        header = TRUE,
+        row.names = 1
+      )
+    )
+)
+
+names(res_mats) <- species_names
+
+```
+
+### Load habitat nodes
+
+```{r load_nodes}
+
+node_fixed <- rast(
+  file.path(
+    results_dir,
+    "Central_terai_PA_1km_fixed.asc"
+  )
+)
+
+```
+
+### Load NTCA corridor
+
+```{r load_ntca}
+
+gov_corr <- vect(
+  file.path(
+    figure_dir,
+    "NTCA_Central_terai_corridor.shp"
+  )
+)
+
+```
+
+# Data preprocessing
+
+Before comparing connectivity patterns among species, all spatial layers are standardized to a common coordinate reference system. Habitat nodes are removed because current accumulates artificially at source and destination locations in Circuitscape analyses. Finally, cumulative current maps are normalized so that connectivity patterns can be compared directly among species.
+
+## Define utility functions
+
+All helper functions are defined here so that the remainder of the workflow reads clearly and avoids repeated code.
+
+### Remove habitat nodes
+
+```{r remove_nodes_function}
+
+remove_nodes <- function(r, node_raster){
+
+  r2 <- r
+
+  r2[node_raster > 0] <- NA
+
+  return(r2)
+
+}
+
+```
+
+### Normalize cumulative current
+
+```{r normalize_function}
+
+normalize_current <- function(r){
+
+  r /
+    global(
+      r,
+      "sum",
+      na.rm = TRUE
+    )[1,1]
+
+}
+
+```
+
+### Extract area-threshold corridor
+
+```{r area_threshold_function}
+
+extract_area_corridor <- function(r,
+                                  area_fraction){
+
+  vals <- values(r)
+
+  vals <- vals[!is.na(vals)]
+
+  threshold <-
+    sort(vals,
+         decreasing = TRUE)[
+           ceiling(
+             area_fraction *
+               length(vals)
+           )
+         ]
+
+  corridor <- r >= threshold
+
+  corridor[corridor == 0] <- NA
+
+  corridor
+
+}
+
+```
+
+### Extract quantile corridor
+
+```{r quantile_function}
+
+extract_quantile_corridor <- function(r, q){
+
+  threshold <- quantile(
+    values(r),
+    q,
+    na.rm = TRUE
+  )
+
+  corridor <- r > threshold
+
+  corridor[corridor != 1] <- NA
+
+  return(corridor)
+
+}
+
+```
+
+### Calculate connectivity captured
+
+```{r capture_function}
+
+capture_connectivity <- function(current_raster,
+                                 corridor){
+
+  captured <-
+    global(
+      current_raster * corridor,
+      "sum",
+      na.rm = TRUE
+    )[1,1]
+
+  total <-
+    global(
+      current_raster,
+      "sum",
+      na.rm = TRUE
+    )[1,1]
+
+  captured / total
+
+}
+
+```
+
+## Standardize coordinate reference systems
+
+All current rasters are assigned the coordinate reference system of the habitat node raster used during Circuitscape analyses. The NTCA corridor shapefile is projected to the same coordinate reference system to ensure spatial compatibility.
+
+```{r standardize_crs}
+
+currents <- lapply(currents, function(r){
+
+  crs(r) <- crs(node_fixed)
+
+  r
+
+})
+
+gov_corr <- project(
+  gov_corr,
+  crs(node_fixed)
+)
+
+```
+
+## Remove habitat nodes
+
+Current values at habitat nodes represent current injection points rather than movement through the landscape. These cells are therefore removed prior to all downstream analyses.
+
+```{r clean_currents}
+
+currents_clean <- lapply(
+  currents,
+  remove_nodes,
+  node_raster = node_fixed
+)
+
+names(currents_clean) <- species_names
+
+```
+
+## Normalize cumulative current
+
+Current maps are normalized so that the sum of current equals one for each species. This enables direct comparison among species despite differences in total current magnitude.
+
+```{r normalize_currents}
+
+currents_norm <- lapply(
+  currents_clean,
+  normalize_current
+)
+
+names(currents_norm) <- species_names
+
+```
+
+### Save normalized current rasters
+
+```{r save_normalized, eval=TRUE}
+
+for(sp in species_names){
+
+  writeRaster(
+    currents_norm[[sp]],
+    filename = file.path(
+      results_dir,
+      paste0(
+        sp,
+        "_current_normalized.tif"
+      )
+    ),
+    overwrite = TRUE
+  )
+
+}
+
+```
+
+## Objects generated during preprocessing
+
+At the end of preprocessing, the following objects are available for all downstream analyses.
+
+| Object | Description |
+|:-------|:------------|
+| `currents` | Original Circuitscape cumulative current rasters |
+| `currents_clean` | Current rasters with habitat nodes removed |
+| `currents_norm` | Normalized cumulative current rasters |
+| `resistance_surfaces` | Resistance surfaces for each species |
+| `res_mats` | Pairwise effective resistance matrices |
+| `gov_corr` | NTCA/Existing corridor polygon |
+
+
+# Species-specific connectivity distribution
+
+Species differ not only in the total resistance they experience across the landscape, but also in how connectivity is spatially distributed. This section first summarizes effective resistance among habitat cores and then evaluates how cumulative current is distributed across the landscape.
+
+Species with highly concentrated connectivity rely on relatively small portions of the landscape, whereas diffuse connectivity indicates movement opportunities spread across larger areas.
+
+## Effective resistance among habitat cores
+
+Pairwise effective resistance matrices summarize the cumulative resistance between every pair of habitat nodes. Mean effective resistance provides an overall measure of landscape permeability for each species.
+
+Higher effective resistance indicates weaker functional connectivity.
+
+```{r effective_resistance}
+
+# Extract upper triangle of each resistance matrix
+res_vals <- lapply(
+  res_mats,
+  function(m)
+    m[upper.tri(m)]
+)
+
+# Mean effective resistance
+mean_eff_res <- sapply(
+  res_vals,
+  mean
+)
+
+mean_eff_res
+
+```
+
+## Connectivity concentration
+
+Current density is sorted from highest to lowest values to determine how much of the landscape is required to support a given proportion of total connectivity.
+
+```{r connectivity_distribution}
+
+connectivity_distribution <- lapply(currents_norm, function(r){
+
+  v <- values(r)
+
+  v <- v[!is.na(v)]
+
+  v <- sort(v, decreasing = TRUE)
+
+  cum_current <- cumsum(v) / sum(v)
+
+  area <- seq_along(v) / length(v)
+
+  data.frame(
+    area = area,
+    cum_current = cum_current
+  )
+
+})
+
+names(connectivity_distribution) <- species_names
+
+```
+
+### Prepare plotting dataframe
+
+```{r distribution_dataframe}
+
+species_order <- c(
+  "SB",
+  "TG",
+  "FC",
+  "LP",
+  "JC"
+)
+
+species_cols <- c(
+
+  "TG" = "#117733",
+
+  "LP" = "#88CCEE",
+
+  "JC" = "#CC6677",
+
+  "FC" = "#44AA99",
+
+  "SB" = "#DDCC77"
+
+)
+
+dist_df <- bind_rows(
+
+  lapply(
+    names(connectivity_distribution),
+    function(sp){
+
+      df <- connectivity_distribution[[sp]]
+
+      df$Species <- sp
+
+      df
+
+    })
+
+)
+
+dist_df$Species <- factor(
+  dist_df$Species,
+  levels = species_order
+)
+
+```
+
+### Connectivity concentration curves
+
+```{r connectivity_curve, fig.width=7, fig.height=6}
+
+ggplot(
+  dist_df,
+  aes(
+    x = area,
+    y = cum_current,
+    colour = Species
+  )
+) +
+
+  geom_line(size = 1.3) +
+
+  geom_hline(
+    yintercept = 0.5,
+    linetype = "dashed",
+    colour = "grey70"
+  ) +
+
+  coord_equal() +
+
+  scale_color_manual(
+    values = species_cols
+  ) +
+
+  theme_classic() +
+
+  labs(
+    x = "Proportion of landscape",
+    y = "Cumulative connectivity"
+  ) +
+
+  theme(
+    legend.position = "right",
+    legend.title = element_blank()
+  )
+
+```
+
+### Area required to capture connectivity
+
+The proportion of landscape required to contain 50%, 75% and 90% of cumulative
+connectivity provides a simple measure of how concentrated movement pathways
+are for each species.
+
+```{r connectivity_summary}
+
+area_50 <- sapply(
+  connectivity_distribution,
+  function(df){
+
+    df$area[
+      which.min(
+        abs(df$cum_current - 0.50)
+      )
+    ]
+
+  }
+)
+
+area_75 <- sapply(
+  connectivity_distribution,
+  function(df){
+
+    df$area[
+      which.min(
+        abs(df$cum_current - 0.75)
+      )
+    ]
+
+  }
+)
+
+area_90 <- sapply(
+  connectivity_distribution,
+  function(df){
+
+    df$area[
+      which.min(
+        abs(df$cum_current - 0.90)
+      )
+    ]
+
+  }
+)
+
+summary_table <- data.frame(
+
+  Species = species_names,
+
+  Area_50 = area_50,
+
+  Area_75 = area_75,
+
+  Area_90 = area_90
+
+)
+
+summary_table
+
+```
+
+# Spatial similarity of connectivity patterns across species
+
+Although species may occupy the same landscape, they do not necessarily use the same movement pathways. To quantify similarity in spatial connectivity, normalized current maps are compared using Spearman rank correlation.
+
+Normalization ensures that comparisons are based on the spatial distribution of connectivity rather than differences in total current magnitude.
+
+### Convert normalized rasters to a dataframe
+
+```{r raster_to_dataframe}
+
+vals <- lapply(
+  currents_norm,
+  values
+)
+
+df <- do.call(
+  cbind,
+  vals
+)
+
+colnames(df) <- species_names
+
+df <- na.omit(df)
+
+```
+
+
+### Spearman correlation matrix
+
+```{r spearman}
+
+cor_matrix <- cor(
+  df,
+  method = "spearman"
+)
+
+cor_matrix
+
+```
+
+### Prepare correlation matrix for plotting
+
+```{r prepare_heatmap}
+
+cor_df <- melt(cor_matrix)
+
+colnames(cor_df) <- c(
+  "Species1",
+  "Species2",
+  "Correlation"
+)
+
+# Keep desired plotting order
+cor_df$Species1 <- factor(
+  cor_df$Species1,
+  levels = species_order
+)
+
+cor_df$Species2 <- factor(
+  cor_df$Species2,
+  levels = species_order
+)
+
+# Convert to numeric indices
+cor_df$i <- as.numeric(cor_df$Species1)
+cor_df$j <- as.numeric(cor_df$Species2)
+
+# Keep only diagonal and lower triangle
+cor_df <- cor_df %>%
+  filter(i >= j)
+
+# Make diagonal NA so it is plotted using na.value
+cor_df$Correlation[cor_df$i == cor_df$j] <- NA
+
+# Labels (blank diagonal)
+cor_df$Label <- ifelse(
+  is.na(cor_df$Correlation),
+  "",
+  sprintf("%.2f", cor_df$Correlation)
+)
+
+```
+
+### Spatial similarity heatmap
+
+```{r correlation_heatmap, fig.width=6, fig.height=5}
+
+ggplot(
+  cor_df,
+  aes(
+    Species1,
+    Species2,
+    fill = Correlation
+  )
+) +
+
+  geom_tile(
+    colour = "white"
+  ) +
+
+  geom_text(
+    aes(label = Label),
+    colour = "grey30",
+    size = 4
+  ) +
+
+  scale_fill_gradient2(
+
+    high = "#44AA99",
+
+    limits = c(0,1),
+
+    na.value = "grey70",
+
+    name = "Spearman\ncorrelation"
+
+  ) +
+
+  coord_equal() +
+
+  theme_classic() +
+
+  labs(
+    x = "",
+    y = ""
+  ) +
+
+  theme(
+    legend.position = "right",
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1
+    )
+  )
+
+```
+
+### Mean spatial similarity
+
+Average pairwise correlation provides an overall measure of how similar each species is to all others.
+
+```{r mean_correlation}
+
+mean_cor <- apply(
+  cor_matrix,
+  1,
+  function(x){
+
+    mean(
+      x[
+        !is.na(x) &
+        x != 1
+      ]
+    )
+
+  }
+)
+
+mean_cor_df <- data.frame(
+
+  Species = names(mean_cor),
+
+  MeanCorrelation = mean_cor
+
+)
+
+mean_cor_df$Species <- factor(
+  mean_cor_df$Species,
+  levels = species_order
+)
+
+ggplot(
+  mean_cor_df,
+  aes(
+    x = 1,
+    y = Species,
+    fill = MeanCorrelation
+  )
+) +
+
+  geom_tile(
+    colour = "white"
+  ) +
+
+  geom_text(
+    aes(
+      label = round(MeanCorrelation,2)
+    ),
+    size = 4,
+    colour = "grey30"
+  ) +
+
+  scale_fill_gradient2(
+
+    high = "#44AA99",
+
+    limits = c(0,1),
+
+    name = "Mean\ncorrelation"
+
+  ) +
+
+  coord_equal() +
+
+  theme_classic() +
+
+  labs(
+    x = "",
+    y = ""
+  ) +
+
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "right"
+  )
+
+```
+
+# Efficiency of optimized corridors
+
+Protected corridor networks occupy a finite area of the landscape.
+To compare the existing corridor network with connectivity
+predicted by Circuitscape, optimized corridors are constrained to
+occupy exactly the same landscape area as the NTCA corridor.
+
+This provides a fair comparison between the existing and optimized
+corridor networks while controlling for total area protected.
+
+### Rasterize existing corridor
+```{r rasterize_ntca}
+gov_corr_rast <- rasterize(
+  gov_corr,
+  node_fixed,
+  field = 1,
+  background = 0
+)
+
+plot(gov_corr_rast)
+
+```
+
+
+### Calculate area occupied by the existing corridor
+```{r ntca_area}
+
+cell_area <- prod(res(node_fixed))
+
+ntca_cells <- global(
+  gov_corr_rast,
+  "sum",
+  na.rm = TRUE
+)[1,1]
+
+ntca_area_km2 <-
+  ntca_cells * cell_area / 1e6
+
+total_cells <-
+  ncell(node_fixed)
+
+area_fraction <-
+  ntca_cells / total_cells
+
+cat(
+  "NTCA corridor area:",
+  round(ntca_area_km2,2),
+  "km²\n"
+)
+
+cat(
+  "Landscape proportion:",
+  round(area_fraction*100,2),
+  "%\n"
+)
+
+```
+
+### Extract area-matched optimized corridor
+```{r optimized_corridors}
+
+optimized_corridors <- lapply(
+  currents_clean,
+  extract_area_corridor,
+  area_fraction = area_fraction
+)
+
+names(optimized_corridors) <- species_names
+
+```
+
+### Estimate captured connectivity by corridors
+
+```{r connectivity_capture}
+
+capture_df <- data.frame(
+
+  Species = species_names,
+
+  Existing = NA,
+
+  Optimized = NA
+
+)
+
+for(i in seq_along(species_names)){
+
+  sp <- species_names[i]
+
+  capture_df$Existing[i] <-
+
+    capture_connectivity(
+      currents_clean[[sp]],
+      gov_corr_rast
+    )
+
+  capture_df$Optimized[i] <-
+
+    capture_connectivity(
+      currents_clean[[sp]],
+      optimized_corridors[[sp]]
+    )
+
+}
+
+capture_df
+
+```
+
+### Plot connectivity captured by optimized and existing corridors
+
+```{r corridor_barplot, fig.width=7, fig.height=5}
+
+capture_long <-
+
+  tidyr::pivot_longer(
+    capture_df,
+    cols = c(Existing, Optimized),
+    names_to = "Corridor",
+    values_to = "Connectivity")
+
+ggplot(
+  capture_long,
+  aes(Species, Connectivity, fill = Corridor)) +
+geom_col(
+  position = "dodge",
+  width = 0.7) +
+
+scale_fill_manual(
+  values = c(
+    Existing = "grey30",
+    Optimized = "#44AA99")
+) +
+
+theme_classic() +
+
+labs(
+  x = NULL,
+  y = "Proportion of total connectivity captured"
+)
+
+```
+
+### Calculate effiency of corridor optimization
+
+```{r}
+
+capture_summary_percent <- capture_df %>%
+  mutate(
+    Existing = Existing * 100,
+    Optimized = Optimized * 100,
+    Difference = Optimized - Existing,
+    Gain = 100 * Difference / Existing
+  ) %>%
+  mutate(
+    across(
+      c(Existing, Optimized, Difference, Gain),
+      ~ round(.x, 1)
+    )
+  )
+
+capture_summary_percent
+```
+
+# Identification of quantile-based optimized corridors
+
+Although the area-matched corridor analysis provides a direct comparison with the existing NTCA corridor network, conservation planning often requires identifying the highest and most efficient connectivity portions of the landscape.
+
+Here, optimized corridors are delineated using the upper 10% (core) and upper 5% (critical) of current values following removal of habitat nodes. These increasingly restrictive thresholds identify the most important movement pathways for each species.
+
+## Species-specific corridors
+
+### Identifying top 5% and 10% quantile corridors
+
+```{r optimized_threshold_corridors}
+
+corridor_10 <- lapply(
+  currents_clean,
+  extract_quantile_corridor,
+  q = 0.90
+)
+
+corridor_5 <- lapply(
+  currents_clean,
+  extract_quantile_corridor,
+  q = 0.95
+)
+
+names(corridor_10) <- species_names
+names(corridor_5) <- species_names
+
+```
+
+### Plotting species-specific corridors on current maps
+
+```{r top10_maps, fig.width=5, fig.height=5}
+
+species_cols <- c(
+  "TG" = "#117733",
+  "LP" = "#88CCEE",
+  "JC" = "#CC6677",
+  "FC" = "#44AA99",
+  "SB" = "#DDCC77"
+)
+
+par(
+  mfrow = c(2,3),
+  mar = c(1,1,2,1)
+)
+
+for(sp in species_names){
+
+  ## Background current surface
+  plot(
+    currents_clean[[sp]],
+    col = grey.colors(100, start = 1, end = 0.2),
+    legend = FALSE,
+    axes = FALSE,
+    box = FALSE,
+    main = sp
+  )
+  ## Optimized 10% corridor
+  corridor10_poly <- as.polygons(
+  corridor_10[[sp]],
+  dissolve = TRUE,
+  values = FALSE
+)
+
+plot(
+  corridor10_poly,
+  border = species_cols[sp],
+  col = NA,
+  lwd = 1.2,
+  add = TRUE
+)
+  ## Optimized 5% corridor
+  plot(
+    corridor_5[[sp]],
+    col = species_cols[sp],
+    add = TRUE,
+    legend = FALSE
+  )
+
+}
+
+```
+
+### Connectivity captured by quantile optimized corridors
+
+The proportion of total cumulative current contained within these quantile corridors provides a measure of how concentrated movement pathways are for each species.
+
+```{r capture_top_corridors}
+
+capture_summary <- data.frame(
+  Species = species_names,
+
+  Top10 = sapply(
+    species_names,
+    function(sp)
+      capture_connectivity(
+        currents_clean[[sp]],
+        corridor_10[[sp]]
+      )
+  ),
+
+  Top5 = sapply(
+    species_names,
+    function(sp)
+      capture_connectivity(
+        currents_clean[[sp]],
+        corridor_5[[sp]]
+      )
+  )
+)
+
+capture_summary <- capture_summary %>%
+  mutate(
+    Top10 = round(Top10 * 100, 1),
+    Top5 = round(Top5 * 100, 1)
+  )
+
+capture_summary
+
+```
+
+## Multispecies connectivity hotspots
+
+Hotspots with felid corridor richness can be demarcated using top 5% or 10% corridors. In the paper, the most critical (top 5%) are plotted with one or more corridor overlap.
+
+As SB corridors were most distinct and constricted, only felid corridors were used for multispecies hotspot mapping.
+
+### Identifying felid richness hotspots
+
+```{r felid_corridors_and_richness}
+
+felids10 <- corridor_10[
+  c(
+    "LP",
+    "FC",
+    "JC",
+    "TG"
+  )
+]
+
+felids5 <- corridor_5[
+  c(
+    "LP",
+    "FC",
+    "JC",
+    "TG"
+  )
+]
+
+richness10 <- sum(
+  rast(felids10),
+  na.rm=TRUE
+)
+
+richness5 <- sum(
+  rast(felids5),
+  na.rm=TRUE
+)
+
+```
+
+### Plotting felid connectivity hotspots
+```{r richness_map,fig.width=6,fig.height=5}
+
+# Keep only habitat nodes
+node_nodes <- ifel(node_fixed > 0, node_fixed, NA)
+
+
+# Convert node raster to polygons (do this once)
+node_poly <- as.polygons(
+  node_nodes,
+  dissolve = TRUE,
+  values = FALSE,
+  na.rm = TRUE
+)
+
+plot(
+
+  richness5,
+
+  col=c(
+    "white",
+    "#fee8c8",
+    "#fdbb84",
+    "#e34a33",
+    "#7f0000"
+  ),
+
+  main="Felid corridor richness (Top 5%)"
+
+)
+
+# Add habitat nodes
+plot(
+  node_poly,
+  col = "black",
+  border = "black",
+  add = TRUE
+)
+
+```
+

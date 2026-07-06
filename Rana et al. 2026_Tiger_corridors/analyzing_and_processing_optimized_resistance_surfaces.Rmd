@@ -1,0 +1,440 @@
+---
+title: "Analyzing and Processing Optimized Resistance Surfaces"
+author: "Divyashree Rana"
+date: "`r Sys.Date()`"
+
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  dpi = 300
+)
+
+```
+
+This workflow reconstructs optimized resistance curves from ResistanceGA outputs, compares species-specific responses to landscape variables, and prepares resistance surfaces and habitat nodes for Circuitscape connectivity analyses.
+
+The workflow consists of the following steps:
+
+1. Load required packages
+2. Define project directories
+3. Summarize raster value ranges
+4. Generate optimized resistance curves
+5. Compare resistance curves among species
+6. Prepare Circuitscape input rasters
+
+# Load required packages
+
+The following packages are required for raster processing, data manipulation, visualization, and preparation of Circuitscape inputs.
+
+```{r load_packages}
+
+library(terra)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+
+```
+
+# Define project directories
+
+Input and output directories are defined once to simplify file management throughout the workflow.
+
+```{r project_directories}
+
+input_dir <- "./input/smooth"
+
+results_dir <- "./results"
+
+raster_dir_1km  <- file.path(input_dir, "rasters_1km")
+raster_dir_2km  <- file.path(input_dir, "rasters_2km")
+raster_dir_5km  <- file.path(input_dir, "rasters_5km")
+raster_dir_10km <- file.path(input_dir, "rasters_10km")
+
+species <- "FC"
+
+```
+
+# Summarize raster value ranges
+
+Optimized resistance functions are applied to raster values scaled between their observed minimum and maximum. Recording the range of each environmental predictor provides a reference for interpreting resistance transformations and confirms consistency across spatial scales.
+
+## Load raster surfaces
+
+```{r load_rasters}
+
+raster_1km <- list.files(
+  raster_dir_1km,
+  pattern = "\\.asc$",
+  full.names = TRUE
+)
+
+raster_2km <- list.files(
+  raster_dir_2km,
+  pattern = "\\.asc$",
+  full.names = TRUE
+)
+
+raster_5km <- list.files(
+  raster_dir_5km,
+  pattern = "\\.asc$",
+  full.names = TRUE
+)
+
+raster_10km <- list.files(
+  raster_dir_10km,
+  pattern = "\\.asc$",
+  full.names = TRUE
+)
+
+all_rasters <- c(
+  raster_1km,
+  raster_2km,
+  raster_5km,
+  raster_10km
+)
+
+```
+
+## Define helper function
+
+```{r range_function}
+
+get_range <- function(file){
+
+  r <- rast(file)
+
+  vals <- global(
+    r,
+    range,
+    na.rm = TRUE
+  )
+
+  data.frame(
+    file = basename(file),
+    xmin = vals[1],
+    xmax = vals[2]
+  )
+
+}
+
+```
+
+## Calculate raster value ranges
+
+```{r raster_ranges}
+
+raster_ranges <-
+  do.call(
+    rbind,
+    lapply(
+      all_rasters,
+      get_range
+    )
+  )
+
+raster_ranges
+
+write.csv(
+  raster_ranges,
+  file.path(
+    input_dir,
+    "raster_range_summary.csv"
+  ),
+  row.names = FALSE
+)
+
+```
+
+# Generate optimized resistance curves
+
+The optimized transformation parameters obtained from ResistanceGA are used to reconstruct resistance functions for each landscape variable. These curves describe how landscape characteristics are translated into movement resistance for each species.
+
+## Define resistance transformation functions
+
+```{r resistance_functions}
+
+mono <- function(x, shape, rmax){
+
+  1 + (rmax - 1) *
+    (
+      (1 - exp(-shape * x)) /
+      (1 - exp(-shape))
+    )
+
+}
+
+inv_mono <- function(x, shape, rmax){
+
+  1 + (rmax - 1) *
+    (
+      (exp(-shape * x) - exp(-shape)) /
+      (1 - exp(-shape))
+    )
+
+}
+
+rev_mono <- function(x, shape, rmax){
+
+  1 + (rmax - 1) *
+    (
+      (1 - exp(-shape * (1 - x))) /
+      (1 - exp(-shape))
+    )
+
+}
+
+inv_rev_mono <- function(x, shape, rmax){
+
+  1 + (rmax - 1) *
+    (
+      (exp(-shape * (1 - x)) - exp(-shape)) /
+      (1 - exp(-shape))
+    )
+
+}
+
+```
+
+## Generate resistance curves
+
+Prepare file with curve parameters for optimized scales of each variable for each species here - ./results/landscape_variables_and_scale_optimized_resistance.csv with columns as "species"	"variable"	"scale"	"equation"	"shape"	"rmax"	"xmin"	"xmax" and each row with a combination of species (s) and optimized variable (n). Hence, total rows = n*s
+
+
+```{r generate_curves}
+
+params <- read.csv(
+  file.path(
+    results_dir,
+    "landscape_variables_and_scale_optimized_resistance.csv"
+  )
+)
+
+# Generate resistance curves
+
+curve_data <- params %>%
+  rowwise() %>%
+  mutate(
+    x_seq = list(seq(0, 1, length.out = 10000)),
+    resistance = list({
+      x <- x_seq
+      s <- cur_data()$shape
+      r <- cur_data()$rmax
+      eq <- cur_data()$equation
+      
+      if (eq == "Monomolecular") {
+        mono(x, s, r)
+      } else if (eq == "Inverse Monomolecular") {
+        inv_mono(x, s, r)
+      } else if (eq == "Reverse Monomolecular") {
+        rev_mono(x, s, r)
+      } else if (eq == "Inverse-Reverse Monomolecular") {
+        inv_rev_mono(x, s, r)
+      }
+    })
+  ) %>%
+  unnest(cols = c(x_seq, resistance)) %>%
+  rename(x_value = x_seq)
+
+```
+
+# Compare resistance curves among species
+
+Species-specific resistance curves are compared to evaluate similarities and differences in landscape responses. Small offsets are applied to the x-axis only for visualization, reducing overlap among nearly identical curves while preserving their overall shapes.
+
+```{r compare_curves}
+curve_data <- curve_data %>%
+  group_by(species, variable) %>%
+  mutate(res_scaled =
+           (resistance - min(resistance)) /
+           (max(resistance) - min(resistance)))
+
+curve_data <- curve_data %>%
+  mutate(
+    species = factor(species, levels = c("TG", "LP", "JC", "FC", "SB"))
+  )
+
+offset_map <- c(
+  "TG" = -0.02,
+  "LP" = -0.01,
+  "JC" =  0.00,
+  "FC" =  0.01,
+  "SB" =  0.02
+) #to avoid overlapping slopes while retaining there shapes and strength
+curve_data <- curve_data %>%
+  mutate(
+    x_jitter = x_value + offset_map[species]
+  )
+
+write.csv(curve_data, "./results/multispecies_resistance_curve_estimated_values.csv", row.names = F)
+
+```
+
+## Plot comparative resistance curves
+
+```{r plot_curves}
+
+curve_data = read.csv("./results/multispecies_resistance_curve_estimated_values.csv")
+
+custom_labs <- c(
+  "Agriculture_density" = "Agriculture density",
+  "Distance_settlement" = "Distance to settlement",
+  "Distance_water" = "Distance to water",
+  "EVI" = "Enhanced Vegetation Index"
+)
+
+ggplot(curve_data,
+       aes(x = x_jitter,
+           y = resistance,
+           colour = species,
+           group = interaction(species, variable))) +
+  geom_line(linewidth = 1.2) +
+  facet_wrap(~ variable, scales = "free_y", labeller = labeller(variable = custom_labs)) +
+  theme_classic() +
+  theme(strip.text = element_text(face = "bold"))+
+  guides(colour = guide_legend(
+    byrow = TRUE,
+    label.theme = element_text(margin = margin(t = 12, b = 12)))) +
+  scale_colour_manual(values = c(
+    "TG" = "#117733",  # green
+    "LP" = "#88CCEE",  # blue
+    "JC" = "#CC6677",  # pink
+    "FC" = "#44AA99",  # teal (replaces yellow-green #BECF5F)
+    "SB" = "#DDCC77"   # soft yellow (cleaner than orange #D9A441)
+  )) +
+  labs(x = "Scaled landscape value (0–1)",
+       y = "Resistance",
+       colour = "Species")
+
+ggsave("./results/plot/multispecies_resistance_curves.png", width = 10, height = 8, units = "in", dpi = 300)
+
+```
+
+# Prepare Circuitscape input rasters
+
+Optimized resistance surfaces and habitat nodes are converted into aligned ASCII rasters suitable for Circuitscape analyses. All spatial layers must share an identical coordinate reference system, extent, resolution, and cell alignment before connectivity modelling.
+
+## Rasterize protected area nodes
+
+```{r rasterize_nodes}
+
+# Load node shapefile
+nodes <- vect("./results/Central_terai_PA.shp")
+crs(nodes) <- "EPSG:4326"
+
+# Load one of your existing rasters as template
+template <- rast("./input/rasters_1km/agri_dens_1km.asc")
+
+nodes_utm <- project(nodes, template)
+
+crs(nodes_utm)
+crs(template)
+
+nodes_utm$ID <- 1:nrow(nodes)
+nodes_rast <- rasterize(
+  nodes_utm,
+  template,
+  field = "ID",
+  background = 0,
+  touches = TRUE
+)
+
+nodes_rast[is.na(nodes_rast)] <- 0
+
+plot(nodes_rast)
+
+writeRaster(nodes_rast, "./results/Central_terai_PA_1km.asc", overwrite = TRUE)
+
+```
+
+## Align resistance and node rasters
+
+The optimized resistance surface is cropped and aligned with the habitat node raster to ensure identical geometry for Circuitscape analyses. In res_rast assign the optimized multisurface with least AIC, selected by the model for creating circuitscale input.
+
+```{r align_rasters}
+
+# Read resistance raster
+res_rast <- rast("./results/FC_subset1_resistance_surface.asc")
+
+# Pick UTM zone based on your study area (e.g., EPSG:32644 for UTM zone 44N)
+crs(res_rast) <- "EPSG:32644"
+
+# Cropping extent with no value - top and right one row cell
+
+# Get original extent
+ext_res <- ext(res_rast)
+
+new_ext <- ext(
+  ext_res$xmin,
+  ext_res$xmax - res(res_rast)[1],  # subtract cell size in x
+  ext_res$ymin,
+  ext_res$ymax - res(res_rast)[2]   # subtract cell size in y
+)
+
+# Crop raster
+res_rast_cropped <- crop(res_rast, new_ext)
+plot(res_rast_cropped)
+
+# Reproject node shapefile
+node <- rast("./results/Central_terai_PA_1km.asc")
+
+# Align node raster to resistance raster
+node_aligned <- resample(node, res_rast_cropped, method = "near")
+
+# Replace NA with 0 (background)
+node_fixed <- classify(node_aligned, cbind(NA, 0))
+
+```
+
+## Verify raster geometry
+
+```{r compare_geometry}
+
+compareGeom(
+  res_rast_cropped,
+  node_fixed,
+  stopOnError = TRUE
+)
+
+```
+
+## Export Circuitscape inputs
+
+```{r export_inputs}
+
+writeRaster(
+  res_rast_cropped,
+  file = file.path(
+    results_dir,
+    paste0(
+      species,
+      "_subset1_resistance_UTM.asc"
+    )
+  ),
+  overwrite = TRUE
+)
+
+writeRaster(
+  node_fixed,
+  file = file.path(
+    results_dir,
+    "Central_terai_PA_1km_fixed.asc"
+  ),
+  overwrite = TRUE
+)
+
+```

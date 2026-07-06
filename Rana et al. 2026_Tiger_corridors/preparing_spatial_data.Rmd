@@ -1,0 +1,265 @@
+---
+title: "Preparing Spatial Data"
+author: "Divyashree Rana"
+date: "`r Sys.Date()`"
+
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  dpi = 300
+)
+
+```
+
+# Load required packages
+
+The following package is required for raster processing, moving window analyses, and exporting resistance surfaces for subsequent optimization.
+
+```{r load_packages}
+
+library(terra)
+
+```
+
+# Load 1 km raster surfaces
+
+Environmental predictor rasters are first imported at their native 1 km resolution from Google Earth Engine and stored in ./input/rasters_1km. These rasters serve as the baseline inputs from which coarser-scale representations are generated using moving window smoothing. This allows rasters processed at different spatial scales to have same resolution and still mergeable for multisurface optimization. 
+
+
+## Import raster layers
+
+```{r load_rasters}
+
+raster_dir <- "./input/rasters_1km"
+
+files <- list.files(
+  raster_dir,
+  pattern = "\\.asc$",
+  full.names = TRUE
+)
+
+files
+
+rasters <- rast(files)
+
+rasters
+
+```
+
+## Check raster consistency
+
+All raster layers should have identical extent, resolution, and coordinate reference system before moving window analyses are performed.
+
+```{r check_geometry}
+
+compareGeom(
+  rasters[[1]],
+  rasters[[2]]
+)
+
+compareGeom(
+  rasters[[1]],
+  rasters[[3]]
+)
+
+compareGeom(
+  rasters[[1]],
+  rasters[[4]]
+)
+```
+
+# Generate smoothed raster surfaces
+
+Moving window analyses are used to summarize environmental conditions across broader neighbourhoods while maintaining the original 1 km raster resolution. Circular moving windows with radii of 2 km, 5 km, and 10 km are applied using focal means.
+
+## Define moving windows
+
+```{r moving_windows}
+
+w2 <- focalMat(
+  rasters[[1]],
+  d = 2000,
+  type = "circle"
+)
+
+w5 <- focalMat(
+  rasters[[1]],
+  d = 5000,
+  type = "circle"
+)
+
+w10 <- focalMat(
+  rasters[[1]],
+  d = 10000,
+  type = "circle"
+)
+```
+
+## Applying moving window smoothening to the 1km rasters
+
+```{r applying_moving_windows}
+rasters_2km <- focal(
+  rasters,
+  w = w2,
+  fun = mean,
+  na.rm = TRUE
+)
+
+rasters_5km <- focal(
+  rasters,
+  w = w5,
+  fun = mean,
+  na.rm = TRUE
+)
+
+rasters_10km <- focal(
+  rasters,
+  w = w10,
+  fun = mean,
+  na.rm = TRUE
+)
+```
+
+## Verify smoothed rasters
+
+Moving window smoothing should preserve raster geometry and should not introduce missing values along raster edges.
+
+```{r verify_rasters}
+
+compareGeom(
+  rasters,
+  rasters_2km
+)
+
+compareGeom(
+  rasters,
+  rasters_5km
+)
+
+compareGeom(
+  rasters,
+  rasters_10km
+)
+
+global(
+  rasters_2km,
+  fun = function(x) sum(is.na(x))
+)
+
+global(
+  rasters_5km,
+  fun = function(x) sum(is.na(x))
+)
+
+global(
+  rasters_10km,
+  fun = function(x) sum(is.na(x))
+)
+
+```
+## Visualize smoothed raster surfaces
+
+```{r plot_smoothed_rasters, fig.width=8, fig.height=8}
+
+par(mfrow = c(2,2), mar = c(2,2,2,4))
+
+plot(
+  rasters,
+  main = paste(names(rasters), "\n1 km")
+)
+
+plot(
+  rasters_2km,
+  main = paste(names(rasters_2km), "\n2 km")
+)
+
+plot(
+  rasters_5km,
+  main = paste(names(rasters_5km), "\n5 km")
+)
+
+plot(
+  rasters_10km,
+  main = paste(names(rasters_10km), "\n10 km")
+)
+
+par(mfrow = c(1,1))
+
+```
+
+# Export raster surfaces
+
+Raster stacks from each spatial scale are exported as ASCII grids for use in subsequent resistance surface optimization analyses. Create a ./input/smooth folder for storing these processed layers of at multiple scales all with a resolution of 1km.
+
+```{r export_rasters}
+
+raster_list <- list(
+  "1km" = rasters,
+  "2km" = rasters_2km,
+  "5km" = rasters_5km,
+  "10km" = rasters_10km
+)
+
+base_dir <- "./input/smooth"
+
+for(scale_name in names(raster_list)) {
+
+  r_stack <- raster_list[[scale_name]]
+
+  out_dir <- file.path(
+    base_dir,
+    paste0("rasters_", scale_name)
+  )
+  
+  ## Create output directory if it does not already exist
+  if(!dir.exists(out_dir)){
+
+    dir.create(
+      out_dir,
+      recursive = TRUE,
+      showWarnings = FALSE
+    )
+
+  }
+
+  for(i in 1:nlyr(r_stack)) {
+
+    writeRaster(
+
+      r_stack[[i]],
+
+      filename = file.path(
+        out_dir,
+        paste0(
+          names(r_stack)[i],
+          "_",
+          scale_name,
+          ".asc"
+        )
+      ),
+
+      overwrite = TRUE,
+
+      filetype = "AAIGrid"
+
+    )
+
+  }
+
+}
+```
+
+

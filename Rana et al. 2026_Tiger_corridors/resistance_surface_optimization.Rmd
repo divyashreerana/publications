@@ -1,0 +1,533 @@
+---
+title: "Resistance Surface Optimization"
+author: "Divyashree Rana"
+date: "`r Sys.Date()`"
+
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  dpi = 300
+)
+
+```
+This workflow allows optimization of resistance surface based on genetic and geographic data objects using ResistanceGA. It further allows you to store outputs and generate circuitscape inputs based on the optimized multisurface resistance raster.
+
+# Load required packages
+
+The following packages are required for spatial data processing, population genetic analyses, resistance surface optimization, statistical analyses, and visualization.
+
+```{r load_packages}
+
+library(terra)
+library(raster)
+library(sf)
+library(units)
+
+library(vcfR)
+library(poppr)
+library(adegenet)
+
+library(ResistanceGA)
+
+library(vegan)
+library(MASS)
+
+library(ggplot2)
+
+library(parallel)
+
+par(mfrow = c(1,1))
+
+```
+
+# Preparing data
+
+Sampling locations and genetic data are imported and converted into formats required by ResistanceGA. Pairwise genetic distances and the corresponding response matrix are then calculated for subsequent optimization analyses. Here the analyses are performed at the scale of individuals rather than populations.
+
+## Define species and paths
+
+ResistanceGA is very finicky about the way paths are called. Maintain the format to avoid technical glitches downstream.
+
+```{r paths}
+
+species <- "TG"
+coord_dir <- "./input/coordinates"
+genotype_dir <- "./input/genotype"
+
+```
+
+## Import sampling coordinates
+
+Sampling coordinates are imported, converted to spatial features, projected to UTM coordinates, and finally converted to `SpatialPoints`, which are required by ResistanceGA. Let's keep the CRS in UTM to get outputs in m after optimization.
+
+```{r import_coordinates}
+
+## Import sampling coordinates
+xy <- read.csv(
+  paste0(coord_dir, "/", species, "_ind_coordinates.csv"),
+  header = TRUE
+)
+
+## Convert to spatial features (WGS84)
+loc_sf <- st_as_sf(
+  xy,
+  coords = c("Lon", "Lat"),
+  crs = 4326
+)
+
+## Project to UTM Zone 44N
+loc_sf_utm <- st_transform(
+  loc_sf,
+  32644
+)
+
+## Convert to SpatialPoints object
+SPs <- sp::SpatialPoints(
+  sf::as_Spatial(loc_sf_utm),
+  proj4string = CRS(
+    "+proj=utm +zone=44 +datum=WGS84 +units=m +no_defs"
+  )
+)
+
+```
+
+## Import multilocus genetic data
+
+Genotypes are imported from the csv for Feliplex genoptypes (felids) or filtered VCF file for ddRAD data (bear) and converted to a `genind` object for downstream population genetic analyses.
+
+```{r import_genotypes}
+
+## Import genetic dataset
+
+data <- read.csv(
+  paste0(genotype_dir, "/", species, "_unique_genotypes.csv")
+)
+
+## Convert to genind object
+dat <- df2genind(
+  X = data[,-c(1:4)],
+  sep = "[|]",
+  ind.names = data$Sample.Name,
+  type = "codom",
+  ncode = 2,
+  pop = data$Pop
+)
+
+# In case of vcf, use this instead
+# data <- read.vcfR(paste0(genotype_dir, "/", species, "_unique_genotypes.vcf"))
+# dat = vcfR2genind(data)
+
+dat
+
+```
+
+## Calculate pairwise genetic distances
+
+Pairwise genetic dissimilarities are calculated among all sampled individuals. ResistanceGA requires these distances as a vector representing the lower triangle of the pairwise distance matrix.
+
+```{r genetic_distance}
+
+## Pairwise genetic distance matrix
+gendist <- diss.dist(dat, percent = TRUE, mat = TRUE)
+
+## Convert to lower triangle vector
+gendist <- gendist[lower.tri(gendist)]
+
+```
+
+# Exploring isolation by distance
+
+Isolation by distance (IBD) evaluates whether genetic differentiation increases with geographic distance among sampled individuals. Because geographic distance alone can explain patterns of genetic structure, it is assessed before optimizing landscape resistance surfaces. 
+
+## Calculate geographic and genetic distances
+
+```{r calculate_distances}
+
+## Pairwise geographic distances (m)
+geo_dist <- sp::spDists(SPs,longlat = FALSE)
+
+## Pairwise genetic distance matrix
+gen_dist <- diss.dist(dat, percent = TRUE,  mat = TRUE)
+
+## Prepare data for Mantel test
+dat$other=xy[,c(3,4)]
+dat=genind2genpop(dat, pop = xy$Ind)
+
+Dgen <- dist.genpop(dat,method=2)
+
+pts <- st_as_sf(dat$other, coords = c("Lon", "Lat"), crs = 4326)
+Dgeo <- st_distance(pts)  # returns units in meters
+Dgeo <- as.dist(drop_units(Dgeo))  # remove units and convert to dist
+
+```
+
+## Mantel test
+
+The Mantel test evaluates the correlation between pairwise genetic and geographic distance matrices using 10,000 permutations. A significant positive correlation indicates a pattern of isolation by distance, suggesting that geographically distant individuals are also more genetically differentiated.
+
+```{r mantel_test}
+
+ibd <- mantel.randtest(
+  Dgen,
+  Dgeo,
+  nrepet = 10000
+)
+
+ibd
+
+```
+
+## Isolation-by-distance plot
+
+A kernel density surface is overlaid on the scatterplot of pairwise genetic and geographic distances to visualize the strength and distribution of the isolation-by-distance relationship.
+
+```{r ibd_plot, fig.width=6, fig.height=5}
+
+## Convert distance matrices to vectors
+gen_vec <- as.vector(
+  as.dist(Dgen)
+)
+
+geo_vec <- as.vector(
+  as.dist(Dgeo)
+)
+
+## Kernel density surface
+dens <- kde2d(
+  geo_vec,
+  gen_vec,
+  n = 300
+)
+
+dens_df <- data.frame(
+  x = rep(dens$x, each = length(dens$y)),
+  y = rep(dens$y, times = length(dens$x)),
+  z = as.vector(dens$z)
+)
+
+## Plot
+ggplot(
+  data.frame(geo = geo_vec, gen = gen_vec  ),
+  aes(x = geo, y = gen)) +
+
+  geom_point(alpha = 0.3, colour = "#88CCEE", size = 0.5) +
+
+  geom_tile(data = dens_df,
+    aes(x = x, y = y, fill = z),
+    alpha = 0.7) +
+
+  geom_contour(
+    data = dens_df,
+    aes(x = x, y = y, z = z), colour = "grey60", linewidth = 0.2) +
+
+  geom_smooth(method = "lm", colour = "black", se = FALSE, linewidth = 0.7) +
+
+  scale_fill_gradientn(
+    colours = c("white","blue","gold","orange","red"), name = "Density") +
+
+  theme_minimal(base_size = 14) +
+
+  labs(title = "Isolation by Distance",
+    x = "Geographic distance (m)",
+    y = "Genetic distance")
+
+```
+
+# Single-surface optimization across spatial scales
+
+ResistanceGA optimizes each candidate resistance surface independently to evaluate its ability to explain observed genetic differentiation. Each environmental variable is optimized across multiple spatial scales in univariate models to identify the scale that best captures the relationship between landscape resistance and gene flow.
+
+## Define optimization settings
+
+```{r optimization_settings}
+
+scales <- c(
+  "1km",
+  "2km",
+  "5km",
+  "10km"
+)
+
+```
+## Prepare ResistanceGA input objects
+
+The genetic distance matrix is converted into the response matrix required for bootstrapping, and the pairwise distance object used throughout ResistanceGA analyses is prepared.
+
+```{r prepare_gdist}
+
+## Create response matrix (genetic distances) only once
+response_mat = matrix(0, length(SPs), length(SPs))
+response_mat[lower.tri(response_mat)] = gendist
+
+
+# Prepare gdist input (shared across scales)
+## Prepares pairwise cost distances for optimizing resistance surfaces
+gdist_input = gdist.prep(
+  n.Pops   = length(SPs),
+  response = gendist,
+  samples  = SPs
+)
+
+```
+## Optimize resistance surfaces
+
+For each spatial scale, ResistanceGA optimizes all candidate resistance surfaces using a genetic algorithm. Model performance is evaluated using AIC, and the optimized models are subsequently assessed using bootstrap resampling to quantify model support.
+
+```{r single_surface_optimization}
+
+for (scale in scales) {
+
+  message(paste0("\nRunning optimization for ", species, " at ", scale, "..."))
+
+  ## Input and output directories
+  raster_dir = file.path("./input", paste0("rasters_", scale))
+  main_dir = paste(getwd(), species, "resistanceGA", sep = "/")
+  name = paste0("SSoptim_utm_", scale, "/")
+  output_dir = paste(main_dir, name, sep = "/")
+
+  # Create the directory if it doesn’t exist
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  # GA optimization setup
+  GA.inputs = GA.prep(
+    ASCII.dir   = raster_dir,
+    Results.dir = output_dir,
+    method      = "AIC",
+    max.cont    = 1000,
+    maxiter     = 1000,
+    parallel    = 4  #you can increase/decrease the cores based on your laptop capacity
+  )
+  
+  # Run optimization
+  SS_RESULTS = SS_optim(
+    gdist.inputs = gdist_input,
+    GA.inputs    = GA.inputs
+  )
+  
+  # Save optimization results
+  saveRDS(SS_RESULTS, file = file.path(output_dir, paste0("SS_RESULTS_", scale, ".rds")))
+  
+  # Bootstrapping
+  mat_list = SS_RESULTS$cd
+  k_vals   = SS_RESULTS$k
+  
+  AIC_boot = Resist.boot(
+    mod.names    = names(mat_list),
+    dist.mat     = mat_list,
+    n.parameters = k_vals[, 2],
+    sample.prop  = 0.75,
+    iters        = 1000,
+    obs          = length(SPs),
+    genetic.mat  = response_mat
+  )
+  
+  # Save bootstrapping output
+  write.csv(AIC_boot, file = file.path(output_dir, paste0("bootstrap_", scale, ".csv")))
+  
+  message(paste0("Finished processing ", scale, "\n"))
+}
+
+```
+# Multi-surface optimization across combinations
+
+Single-surface optimization identifies the best transformation for each landscape variable independently. These optimized transformations are subsequently combined to evaluate whether multiple landscape variables jointly explain patterns of genetic differentiation better than any individual surface alone.
+
+Before beginning multisurface optimization, make a .species/resistanceGA/multisurface folder, and put raw .asc and .prj for the optimized scale of each landscape variables. This folder should have n .asc files if you have n landscape variables to be used for multisurface optimization.
+
+## Generate candidate surface combinations
+
+All possible combinations of two or more optimized resistance surfaces are generated automatically. Each combination is stored in a separate directory together with a lookup table describing the rasters included in each candidate model.
+
+```{r generate_surface_combinations}
+
+## List optimized resistance surfaces
+surfaces <- list.files(
+  paste0(main_dir, "/multisurface"),
+  full.names = TRUE,
+  pattern = "\\.asc$"
+)
+
+## Generate all combinations containing two or more surfaces
+all_combos <- unlist(
+  lapply(2:length(surfaces), function(k) combn(surfaces, k, simplify = FALSE)),
+  recursive = FALSE
+)
+
+
+## Create folders for each candidate model
+for (i in seq_along(all_combos)) {
+
+  subset_dir <- paste(
+    main_dir,
+    paste0("subset_", i),
+    sep = "/"
+  )
+
+  raster_dir <- paste(
+    subset_dir,
+    "raster",
+    sep = "/"
+  )
+
+  dir.create(
+    raster_dir,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+
+  file.copy(
+    all_combos[[i]],
+    raster_dir,
+    overwrite = TRUE
+  )
+
+}
+
+## Save lookup table
+lookup <- data.frame(
+  subset_id = seq_along(all_combos),
+  rasters_used = sapply(
+    all_combos,
+    function(x)
+      paste(
+        basename(x),
+        collapse = ";")))
+
+write.csv(
+  lookup,
+  paste(main_dir, "subset_lookup.csv", sep = "/"),
+  row.names = FALSE)
+
+```
+
+## Optimize multisurface models
+
+Each candidate combination is optimized using the transformation parameters obtained from the single-surface analyses. Generate a PARM dataset based on the single surface resistance curve optimization values. Model support is evaluated using AIC, allowing direct comparison among all candidate multisurface models.
+
+```{r multisurface_optimization}
+
+## Load lookup table
+lookup <- read.csv(paste(main_dir, "subset_lookup.csv", sep = "/"))
+
+## Global parameter vector
+PARM <- c(
+  3, 3.46, 998,
+  3, 0.85, 914,
+  7, 1.13, 965,
+  7, 3.47, 12.39,
+  7, 0.50, 52.62
+)
+
+## Map parameters to optimized surfaces
+parm_map <- split(PARM, rep(1:(length(PARM)/3), each = 3))
+
+names(parm_map) <- basename(
+  list.files(
+    paste0(main_dir, "/multisurface"),
+    full.names = TRUE,
+    pattern = "\\.asc$"))
+
+## Store optimization results
+results <- list()
+
+for (i in seq_len(nrow(lookup))) {
+
+  raster_dir <- paste(main_dir, paste0("subset_", i), "raster", sep = "/")
+
+  name <- paste0("subset_", i, "/")
+  
+  results_dir <- paste(main_dir, name, sep = "/")
+
+  cat("\n▶ Running subset", i, "with rasters:", lookup$rasters_used[i], "\n")
+
+  ## Prepare GS inout
+  compiledGA_input <- GA.prep(
+    ASCII.dir = raster_dir,
+    Results.dir = results_dir,
+    method = "AIC",
+    max.cont = 1000,
+    maxiter = 1000,
+    parallel = 4,
+    k.value = 4
+  )
+
+  ## Extract correct PARM values for this subset
+  rasters_in_subset <- strsplit(lookup$rasters_used[i], ";")[[1]]
+  parm_subset <- unlist(parm_map[rasters_in_subset])
+
+  
+  ## Combine surfaces
+  Resistance <- Combine_Surfaces(
+    PARM         = parm_subset,
+    gdist.inputs = gdist_input,
+    GA.inputs    = compiledGA_input,
+    out          = NULL,
+    rescale      = TRUE,
+    p.contribution = TRUE
+  )
+  
+  ## Prepare gdist input for MS_optim
+  gdist_input = gdist.prep(
+    n.Pops   = length(SPs),
+    response = gendist,
+    samples  = SPs
+  )
+  
+  ## Run optimization
+  results[[i]] <- MS_optim(
+    gdist.inputs = gdist_input,
+    GA.inputs    = compiledGA_input
+  )
+}
+
+save(
+  results, file = paste(main_dir, "multisurface_results.rda", sep = "/")
+)
+
+```
+
+## Summarize model performance
+
+Model support across all candidate multisurface models is summarized by extracting the AICc values and the number of fitted parameters for each optimized model.
+
+```{r summarize_multisurface_models}
+
+aic_extract <- do.call(
+  rbind,
+  lapply(
+    seq_along(results),
+    function(i){
+
+      if(!is.null(results[[i]])){
+
+        data.frame(
+          subset_id = i,
+          AICc = results[[i]]$AICc.tab,
+          k = results[[i]]$k
+        )
+
+      }
+
+    }
+  )
+)
+
+write.csv(aic_extract, paste(main_dir,"AIC_across_combinations.csv",sep = "/"), row.names = FALSE)
+aic_extract
+
+```
