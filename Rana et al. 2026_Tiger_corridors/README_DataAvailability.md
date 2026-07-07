@@ -1,4 +1,5 @@
 The available data and code has been used in the manuscript titled "There is no silver bullet: Tiger corridors do not ensure multispecies carnivore connectivity" submitted to bioRxiv in July 2026.
+bioRxiv doi: https://www.biorxiv.org/content/10.64898/2026.07.05.736645v1
 
 The description of attached files are as follows.
 
